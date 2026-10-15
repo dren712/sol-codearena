@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id             String       @id @default(cuid())
+  walletAddress  String       @unique
+  username       String?
+  createdAt      DateTime     @default(now())
+  completedCount Int          @default(0)
+  totalScore     Int          @default(0)
+  submissions    Submission[]
+  completions    Completion[]
+}
+
+model Challenge {
+  id               String       @id
+  slug             String       @unique
+  title            String
+  description      String
+  difficulty       String
+  category         String
+  points           Int
+  starterCode      String
+  solutionTemplate String
+  testCases        String
+  concepts         String
+  order            Int
+  submissions      Submission[]
+  completions      Completion[]
+}
+
+model Submission {
+  id              String    @id @default(cuid())
+  userId          String
+  challengeId     String
+  code            String
+  status          String    // "passed" | "failed"
+  score           Int       @default(0)
+  executionOutput String
+  txSignature     String?
+  createdAt       DateTime  @default(now())
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge       Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+}
+
+model Completion {
+  id          String    @id @default(cuid())
+  userId      String
+  challengeId String
+  txSignature String?
+  completedAt DateTime  @default(now())
+  verified    Boolean   @default(true)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  challenge   Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, challengeId])
+}

@@ -1,0 +1,27 @@
+{
+  "name": "solana-code-arena",
+  "version": "1.0.0",
+  "description": "Interactive learning platform for developers to learn Solana development by solving practical coding challenges",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "start": "npm --prefix apps/web run start",
+    "db:push": "npm --prefix apps/web run db:push",
+    "db:seed": "npm --prefix apps/web run db:seed"
+  },
+  "keywords": [
+    "solana",
+    "web3",
+    "learning",
+    "anchor",
+    "education",
+    "coding-challenges"
+  ],
+  "author": "Darshan Gaikwad",
+  "license": "MIT"
+}
