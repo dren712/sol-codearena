@@ -26,8 +26,9 @@ module.exports = {
         },
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'Fira Code', 'Menlo', 'Monaco', 'Courier New', 'monospace'],
-        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        // First entries are the CSS variables set by next/font in app/layout.tsx.
+        mono: ['var(--font-mono)', 'Fira Code', 'Menlo', 'Monaco', 'Courier New', 'monospace'],
+        sans: ['var(--font-inter)', 'system-ui', '-apple-system', 'sans-serif'],
       },
     },
   },

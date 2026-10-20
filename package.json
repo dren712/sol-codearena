@@ -12,7 +12,13 @@
     "build": "npm --prefix apps/web run build",
     "start": "npm --prefix apps/web run start",
     "db:push": "npm --prefix apps/web run db:push",
-    "db:seed": "npm --prefix apps/web run db:seed"
+    "db:seed": "npm --prefix apps/web run db:seed",
+    "test": "npm --prefix apps/web run test",
+    "typecheck": "npm --prefix apps/web run typecheck",
+    "lint": "npm --prefix apps/web run lint",
+    "test:program": "cargo test",
+    "check:program": "cargo check",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run test:program && npm run build"
   },
   "keywords": [
     "solana",

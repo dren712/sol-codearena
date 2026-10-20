@@ -1,6 +1,7 @@
 import { PublicKey, TransactionInstruction, SystemProgram } from '@solana/web3.js';
+import { createHash } from 'crypto';
 
-export const CODE_ARENA_PROGRAM_ID = new PublicKey('Arena111111111111111111111111111111111111111');
+export const CODE_ARENA_PROGRAM_ID = new PublicKey('A4oqd9fv4zzrFastj5VSNoe4ZdjHq3FUisSo3Dn1u6LS');
 
 export const CODE_ARENA_IDL = {
   version: '0.1.0',
@@ -100,12 +101,7 @@ export function getInstructionDiscriminator(name: string): Buffer {
   if (ANCHOR_DISCRIMINATORS[name]) {
     return Buffer.from(ANCHOR_DISCRIMINATORS[name]);
   }
-  try {
-    const { createHash } = require('crypto');
-    return createHash('sha256').update(`global:${name}`).digest().subarray(0, 8);
-  } catch {
-    return Buffer.alloc(8);
-  }
+  return createHash('sha256').update(`global:${name}`).digest().subarray(0, 8);
 }
 
 /**

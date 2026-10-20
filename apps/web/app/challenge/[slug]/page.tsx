@@ -1,23 +1,17 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import {
-  PublicKey,
-  Transaction,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-} from '@solana/web3.js';
+import { Transaction } from '@solana/web3.js';
 import confetti from 'canvas-confetti';
 import {
   Play,
   RotateCcw,
   CheckCircle2,
   XCircle,
-  HelpCircle,
   Sparkles,
   ExternalLink,
   ChevronLeft,
@@ -29,18 +23,23 @@ import {
   Loader2,
   Info,
   BookOpen,
-  ArrowRight,
   Zap,
 } from 'lucide-react';
 import { CHALLENGES } from '@challenges/data';
+import { extractFailureMarkers } from '../../../lib/marker-map';
+import HintLadder from '../../../components/HintLadder';
+import PdaVisualizer from '../../../components/PdaVisualizer';
+import CertificateCard from '../../../components/CertificateCard';
 import {
-  getUserPda,
   getCompletionPda,
+  getUserPda,
+  CODE_ARENA_PROGRAM_ID,
+  createInitializeUserInstruction,
   createRecordCompletionInstruction,
   getExplorerTxUrl,
   getExplorerAddressUrl,
 } from '@packages/sdk';
-import { ValidationResult, TestResult } from '@packages/types';
+import type { ValidationResult } from '@packages/types';
 
 // Dynamically import Monaco Editor to prevent SSR issues
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), {
@@ -54,11 +53,14 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), {
 
 export default function ChallengeDetailPage() {
   const params = useParams();
-  const router = useRouter();
   const slug = params?.slug as string;
 
-  const challenge = CHALLENGES.find((c) => c.slug === slug) || CHALLENGES[0];
-  const { publicKey, sendTransaction, connected, signTransaction } = useWallet();
+  const matchedChallenge = CHALLENGES.find((c) => c.slug === slug);
+
+// Hooks below must run unconditionally, so the fallback catalogue entry is used
+// for state initialisation. `matchedChallenge` decides what actually renders.
+const challenge = matchedChallenge ?? CHALLENGES[0];
+  const { publicKey, sendTransaction, signTransaction } = useWallet();
   const { connection } = useConnection();
 
   // Editor and Execution State
@@ -86,6 +88,26 @@ export default function ChallengeDetailPage() {
   const [completionPda, setCompletionPda] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
   const [isCompleted, setIsCompleted] = useState<boolean>(false);
+  /** Server-side verdict on whether the completion was proven on-chain. */
+  const [verification, setVerification] = useState<{
+    verified: boolean;
+    signatureConfirmed: boolean;
+    reason: string;
+  } | null>(null);
+  /** Human-readable note when the chain could not be reached. */
+  const [chainNote, setChainNote] = useState<string | null>(null);
+  const [showCertificate, setShowCertificate] = useState(false);
+  const [failedRuns, setFailedRuns] = useState(0);
+  // Monaco instances for gutter feedback markers.
+  const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
+
+  /**
+   * Whether the Code Arena program actually exists on the cluster.
+   * The UI only claims "the program is not deployed yet" when that is
+   * literally true — the day it is deployed, this flips automatically.
+   */
+  const [programDeployed, setProgramDeployed] = useState<boolean | null>(null);
 
   // Check if challenge is already completed in database
   useEffect(() => {
@@ -100,6 +122,15 @@ export default function ChallengeDetailPage() {
           if (comp?.txSignature) {
             setTxSignature(comp.txSignature);
           }
+          if (typeof comp?.verified === 'boolean') {
+            setVerification({
+              verified: comp.verified,
+              signatureConfirmed: !!comp.txSignature,
+              reason: comp.verified
+                ? 'Verified on-chain.'
+                : 'Recorded locally — not verified against the cluster.',
+            });
+          }
           const [pda] = getCompletionPda(publicKey, challenge.id);
           setCompletionPda(pda.toBase58());
         }
@@ -110,6 +141,67 @@ export default function ChallengeDetailPage() {
     checkCompletion();
   }, [publicKey, challenge.id]);
 
+  // Probe once: does the deployed program exist on the cluster?
+  useEffect(() => {
+    let alive = true;
+    connection
+      .getAccountInfo(CODE_ARENA_PROGRAM_ID)
+      .then((info) => {
+        if (alive) setProgramDeployed(Boolean(info));
+      })
+      .catch(() => {
+        if (alive) setProgramDeployed(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [connection]);
+
+  // Track failed runs for the hint ladder's 'stuck?' prompt.
+  useEffect(() => {
+    if (validationResult && !validationResult.success) {
+      setFailedRuns((n) => n + 1);
+    }
+  }, [validationResult]);
+
+  // Inline editor feedback: only show squiggles the validator can honestly
+  // locate (line-bearing diagnostics). Otherwise markers stay empty — the
+  // failure strip below the editor carries the summary instead.
+  useEffect(() => {
+    const monaco = monacoRef.current;
+    const editor = editorRef.current;
+    if (!monaco || !editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    const markers: any[] = [];
+    if (validationResult && !validationResult.success) {
+      const failing = validationResult.testResults.filter((t) => !t.passed);
+      const texts = [
+        validationResult.output,
+        validationResult.message,
+        ...failing.flatMap((t) => [t.name, t.message ?? '', t.expected ?? '', t.actual ?? '']),
+      ];
+      const totalLines = code.split('\n').length;
+      for (const marker of extractFailureMarkers(texts, totalLines)) {
+        markers.push({
+          startLineNumber: marker.line,
+          endLineNumber: marker.line,
+          startColumn: 1,
+          endColumn: 2,
+          message: marker.message,
+          severity: monaco.MarkerSeverity.Error,
+          source: 'Arena validator',
+        });
+      }
+    }
+    monaco.editor.setModelMarkers(model, 'arena', markers);
+  }, [validationResult, code]);
+
+  const failingResults = validationResult?.testResults.filter((t) => !t.passed) ?? [];
+  const firstFailingTest = failingResults[0] ?? null;
+  const failingTestCount = failingResults.length;
+
   // Reset code when slug changes
   useEffect(() => {
     setCode(challenge.starterCode);
@@ -117,6 +209,10 @@ export default function ChallengeDetailPage() {
     setTxSignature(null);
     setCompletionPda(null);
     setTxError(null);
+    setVerification(null);
+    setChainNote(null);
+    setShowCertificate(false);
+    setFailedRuns(0);
   }, [challenge]);
 
   // Run Test Suite / Validation
@@ -184,16 +280,25 @@ export default function ChallengeDetailPage() {
       const [compPda] = getCompletionPda(publicKey, challenge.id);
       setCompletionPda(compPda.toBase58());
 
-      let recordedSig = '';
-
       // Attempt actual on-chain transaction if wallet is connected and funded
+      let recordedSig: string | null = null;
+      let chainUnavailableReason: string | null = null;
+
       try {
-        const ix = createRecordCompletionInstruction(
-          publicKey,
-          challenge.id,
-          challenge.points
-        );
-        const tx = new Transaction().add(ix);
+        // One wallet approval covers both steps: `initialize_user` runs first
+        // only when the User PDA does not exist yet, then `record_completion` —
+        // executed atomically inside the same transaction.
+        const [userPda] = getUserPda(publicKey, CODE_ARENA_PROGRAM_ID);
+        const userInfo = await connection.getAccountInfo(userPda);
+
+        const ixs = [
+          createRecordCompletionInstruction(publicKey, challenge.id, challenge.points),
+        ];
+        if (!userInfo) {
+          ixs.unshift(createInitializeUserInstruction(publicKey, CODE_ARENA_PROGRAM_ID));
+        }
+
+        const tx = new Transaction().add(...ixs);
         const latestBlockhash = await connection.getLatestBlockhash('confirmed');
         tx.recentBlockhash = latestBlockhash.blockhash;
         tx.feePayer = publicKey;
@@ -212,19 +317,23 @@ export default function ChallengeDetailPage() {
           recordedSig = await sendTransaction(tx, connection);
         }
       } catch (chainErr: any) {
-        console.warn(
-          'Devnet transaction execution fallback (likely unfunded wallet or local IDL registry):',
-          chainErr
-        );
-        // Fallback for Demo Day to ensure frictionless demo without wallet balance blockers:
-        // We generate a deterministic Devnet verifiable proof signature so the student still sees full flow
-        const randomHex = Array.from({ length: 64 }, () =>
-          Math.floor(Math.random() * 16).toString(16)
-        ).join('');
-        recordedSig = `arena_proof_${randomHex.slice(0, 48)}`;
+        // Demo Day fallback: the program may not be deployed and the wallet may
+        // be unfunded. Progress is still saved locally, but it is recorded as
+        // *unverified* — the server checks the signature and will not mark it
+        // as an on-chain proof.
+        console.warn('Devnet transaction could not be sent:', chainErr);
+        const rawMsg: string = chainErr?.message || '';
+        const friendlyReason = /reject|decline|denied|dismiss/i.test(rawMsg)
+          ? 'You dismissed the wallet prompt, so nothing was sent to Solana.'
+          : rawMsg
+            ? `Transaction could not be sent: ${rawMsg}`
+            : 'The Devnet transaction could not be sent.';
+        chainUnavailableReason = `Progress saved locally (unverified). ${friendlyReason}`;
+        recordedSig = null;
       }
 
       setTxSignature(recordedSig);
+      setChainNote(chainUnavailableReason);
 
       // Persist completion in database
       const compRes = await fetch('/api/completions', {
@@ -234,13 +343,14 @@ export default function ChallengeDetailPage() {
           walletAddress: publicKey.toBase58(),
           challengeId: challenge.id,
           txSignature: recordedSig,
-          score: challenge.points,
         }),
       });
 
       const compData = await compRes.json();
       if (compData.success) {
         setIsCompleted(true);
+        setVerification(compData.verification ?? null);
+        setShowCertificate(true);
         try {
           confetti({
             particleCount: 120,
@@ -249,6 +359,8 @@ export default function ChallengeDetailPage() {
             colors: ['#14F195', '#9945FF'],
           });
         } catch {}
+      } else if (!compRes.ok) {
+        setTxError(compData.error ?? 'Could not record the completion.');
       }
     } catch (err: any) {
       console.error('Error recording completion on chain:', err);
@@ -390,6 +502,27 @@ export default function ChallengeDetailPage() {
   const nextChallenge =
     currentIndex < CHALLENGES.length - 1 ? CHALLENGES[currentIndex + 1] : null;
 
+  // Unknown slugs used to silently render challenge 01, which is confusing
+  // during a live demo — say so explicitly instead.
+  if (!matchedChallenge) {
+    return (
+      <div className="flex-1 flex items-center justify-center px-4 py-20">
+        <div className="max-w-md w-full text-center space-y-4">
+          <h1 className="text-xl font-bold text-white">Challenge not found</h1>
+          <p className="text-sm text-slate-400">
+            No challenge matches <code className="font-mono text-solana-teal">{slug}</code>.
+          </p>
+          <Link
+            href="/challenges"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded bg-solana-purple hover:bg-[#a855f7] text-white font-semibold text-xs font-mono transition-colors"
+          >
+            <span>Browse all challenges</span>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)] bg-background overflow-hidden">
       {/* Challenge Sub-Header */}
@@ -528,6 +661,20 @@ export default function ChallengeDetailPage() {
                   </div>
                 ))}
 
+                {/* Progressive hint ladder */}
+                {challenge.hints && challenge.hints.length > 0 && (
+                  <div className="pt-3 border-t border-surface-border/50">
+                    <HintLadder hints={challenge.hints} slug={challenge.slug} failedRuns={failedRuns} />
+                  </div>
+                )}
+
+                {/* Interactive PDA derivation visualizer — flagship challenge */}
+                {challenge.slug === '04-pdas' && (
+                  <div className="pt-3 border-t border-surface-border/50">
+                    <PdaVisualizer initialSeeds={['user', 'wallet-pubkey']} />
+                  </div>
+                )}
+
                 {/* Documentation Links */}
                 {challenge.docLinks && challenge.docLinks.length > 0 && (
                   <div className="pt-3 border-t border-surface-border/50 space-y-1.5">
@@ -628,8 +775,20 @@ export default function ChallengeDetailPage() {
               language="typescript"
               theme="vs-dark"
               value={code}
-              onChange={(newVal) => setCode(newVal || '')}
+              onChange={(newVal) => {
+                setCode(newVal || '');
+                try {
+                  const model = editorRef.current?.getModel();
+                  if (model && monacoRef.current) {
+                    monacoRef.current.editor.setModelMarkers(model, 'arena', []);
+                  }
+                } catch {}
+              }}
               beforeMount={handleEditorBeforeMount}
+              onMount={(editor, monaco) => {
+                editorRef.current = editor;
+                monacoRef.current = monaco;
+              }}
               options={{
                 minimap: { enabled: false },
                 fontSize: 13,
@@ -642,6 +801,32 @@ export default function ChallengeDetailPage() {
               }}
             />
           </div>
+
+          {/* Inline failure feedback: first failing test, expected vs actual */}
+          {validationResult && !validationResult.success && firstFailingTest && (
+            <div
+              aria-live="polite"
+              className="border-t border-rose-900/40 bg-rose-950/20 px-3 py-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]"
+            >
+              <XCircle className="w-3.5 h-3.5 text-rose-400" />
+              <span className="text-rose-300 font-semibold">{firstFailingTest.name}</span>
+              {firstFailingTest.message ? (
+                <span className="text-rose-200/80">{firstFailingTest.message}</span>
+              ) : (
+                <>
+                  <span className="px-1.5 py-0.5 rounded bg-surface-200 border border-rose-900/50 text-slate-300">
+                    expected <span className="text-emerald-400">{firstFailingTest.expected ?? '?'}</span>
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded bg-surface-200 border border-rose-900/50 text-slate-300">
+                    got <span className="text-rose-400">{firstFailingTest.actual ?? '—'}</span>
+                  </span>
+                  {failingTestCount > 1 && (
+                    <span className="text-slate-500">+{failingTestCount - 1} more in Test Results</span>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Test Runner / Output Drawer */}
           <div className="h-52 border-t border-surface-border bg-surface-300 flex flex-col font-mono text-xs">
@@ -739,7 +924,7 @@ export default function ChallengeDetailPage() {
                   </div>
                 ) : (
                   <div className="h-full flex items-center justify-center text-slate-500 font-mono text-[11px]">
-                    Click "Run & Submit" to execute your solution against the verification suite.
+                    Click &quot;Run &amp; Submit&quot; to execute your solution against the verification suite.
                   </div>
                 )
               ) : (
@@ -820,14 +1005,38 @@ export default function ChallengeDetailPage() {
               {/* Confirmed On-Chain Details */}
               {(isCompleted || txSignature) && (
                 <div className="space-y-2 pt-2 border-t border-surface-border/50 font-mono text-[11px]">
-                  <div className="text-emerald-400 font-semibold flex items-center gap-1">
+                  <div
+                    className={`font-semibold flex items-center gap-1 ${
+                      verification?.verified ? 'text-emerald-400' : 'text-amber-400'
+                    }`}
+                  >
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Completion Recorded on Solana</span>
+                    <span>
+                      {verification?.verified
+                        ? 'Completion recorded on Solana Devnet'
+                        : 'Completion saved locally — not on-chain'}
+                    </span>
                   </div>
+
+                  {verification && !verification.verified && (
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      {chainNote || verification.reason}
+                    </p>
+                  )}
+
+                  {verification && !verification.verified && programDeployed === false && (
+                    <p className="text-[11px] text-amber-400/80 leading-relaxed">
+                      The Code Arena program is not deployed on Devnet yet, so
+                      nothing can be written on-chain for this demo — this
+                      unlocks the day the program ID goes live.
+                    </p>
+                  )}
 
                   {completionPda && (
                     <div className="space-y-0.5">
-                      <div className="text-slate-500 text-[10px]">Completion PDA:</div>
+                      <div className="text-slate-500 text-[10px]">
+                        Completion PDA (where it lives once recorded on-chain):
+                      </div>
                       <a
                         href={getExplorerAddressUrl(completionPda)}
                         target="_blank"
@@ -855,14 +1064,16 @@ export default function ChallengeDetailPage() {
                     </div>
                   )}
 
-                  <a
-                    href={txSignature ? getExplorerTxUrl(txSignature) : 'https://explorer.solana.com/?cluster=devnet'}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-solana-green font-semibold text-xs mt-1 hover:underline"
-                  >
-                    <span>View on Solana Explorer →</span>
-                  </a>
+                  {txSignature && (
+                    <a
+                      href={getExplorerTxUrl(txSignature)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-solana-green font-semibold text-xs mt-1 hover:underline"
+                    >
+                      <span>View on Solana Explorer →</span>
+                    </a>
+                  )}
                 </div>
               )}
             </div>
@@ -964,6 +1175,17 @@ export default function ChallengeDetailPage() {
           </div>
         </div>
       </div>
+    {showCertificate && (
+      <CertificateCard
+        challengeTitle={challenge.title}
+        challengeId={challenge.id}
+        score={challenge.points}
+        verified={!!verification?.verified}
+        walletAddress={publicKey?.toBase58() ?? ''}
+        onClose={() => setShowCertificate(false)}
+      />
+    )}
     </div>
   );
 }
+

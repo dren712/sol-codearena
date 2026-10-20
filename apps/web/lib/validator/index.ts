@@ -1,8 +1,30 @@
 import { PublicKey, Keypair, LAMPORTS_PER_SOL, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
+import * as web3 from '@solana/web3.js';
 import type { AccountInfo } from '@solana/web3.js';
 import { CHALLENGES } from '../challenges';
-import { Challenge, ValidationResult, TestResult } from '../types';
+import type { Challenge, ValidationResult, TestResult } from '../types';
 import nacl from 'tweetnacl';
+import * as splToken from '@solana/spl-token';
+import * as bs58 from 'bs58';
+import { createHash, randomBytes } from 'crypto';
+import ts from 'typescript';
+import vm from 'node:vm';
+
+/** Wall-clock budget for one submission. Protects the server from infinite loops. */
+const DEFAULT_EXECUTION_TIMEOUT_MS = Number(process.env.VALIDATOR_TIMEOUT_MS ?? 4000);
+
+/** Submissions above this size are rejected before any execution happens. */
+const MAX_SUBMISSION_BYTES = Number(process.env.VALIDATOR_MAX_CODE_BYTES ?? 100_000);
+
+export class ValidatorError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = 'ValidatorError';
+    this.status = status;
+  }
+}
 
 export class ChallengeValidator {
   /**
@@ -11,7 +33,8 @@ export class ChallengeValidator {
   public static async validate(
     challengeSlug: string,
     userCode: string,
-    walletAddress?: string
+    walletAddress?: string,
+    options: { timeoutMs?: number } = {}
   ): Promise<ValidationResult> {
     const challenge = CHALLENGES.find((c) => c.slug === challengeSlug);
     if (!challenge) {
@@ -24,28 +47,32 @@ export class ChallengeValidator {
       };
     }
 
+    const timeoutMs = options.timeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
+
+    this.assertSubmissionIsRunnable(userCode, timeoutMs);
+
     try {
       switch (challenge.slug) {
         case '01-wallets':
-          return await this.validateWallets(userCode, challenge);
+          return await this.validateWallets(userCode, challenge, timeoutMs);
         case '02-transactions':
-          return await this.validateTransactions(userCode, challenge);
+          return await this.validateTransactions(userCode, challenge, timeoutMs);
         case '03-accounts':
-          return await this.validateAccounts(userCode, challenge);
+          return await this.validateAccounts(userCode, challenge, timeoutMs);
         case '04-pdas':
-          return await this.validatePdas(userCode, challenge, walletAddress);
+          return await this.validatePdas(userCode, challenge, walletAddress, timeoutMs);
         case '05-instructions':
-          return await this.validateInstructions(userCode, challenge);
+          return await this.validateInstructions(userCode, challenge, timeoutMs);
         case '06-anchor':
-          return await this.validateAnchor(userCode, challenge);
+          return await this.validateAnchor(userCode, challenge, timeoutMs);
         case '07-spl-tokens':
-          return await this.validateSplTokens(userCode, challenge);
+          return await this.validateSplTokens(userCode, challenge, timeoutMs);
         case '08-token-accounts':
-          return await this.validateTokenAccounts(userCode, challenge);
+          return await this.validateTokenAccounts(userCode, challenge, timeoutMs);
         case '09-cpi':
-          return await this.validateCpi(userCode, challenge);
+          return await this.validateCpi(userCode, challenge, timeoutMs);
         case '10-deploy':
-          return await this.validateDeploy(userCode, challenge);
+          return await this.validateDeploy(userCode, challenge, timeoutMs);
         default:
           return await this.validateGeneric(userCode, challenge);
       }
@@ -65,35 +92,64 @@ export class ChallengeValidator {
     }
   }
 
-  private static evaluateModule(userCode: string, context: Record<string, any>) {
-    let jsCode = userCode;
-    try {
-      const ts = require('typescript');
-      jsCode = ts.transpileModule(userCode, {
-        compilerOptions: {
-          module: ts.ModuleKind.CommonJS,
-          target: ts.ScriptTarget.ES2022,
-          esModuleInterop: true,
-          allowSyntheticDefaultImports: true,
-          removeComments: false,
-        },
-      }).outputText;
-    } catch {
-      jsCode = userCode.replace(/import\s+[^;]+;?/g, '');
+  /**
+   * Rejects submissions that cannot be executed safely, before any code runs.
+   */
+  private static assertSubmissionIsRunnable(userCode: unknown, timeoutMs: number): void {
+    if (typeof userCode !== 'string') {
+      throw new ValidatorError('Submission must be a string of code.');
     }
 
+    if (userCode.length === 0) {
+      throw new ValidatorError('Submission is empty.');
+    }
+
+    const bytes = Buffer.byteLength(userCode, 'utf8');
+    if (bytes > MAX_SUBMISSION_BYTES) {
+      throw new ValidatorError(
+        `Submission is ${bytes} bytes, which exceeds the ${MAX_SUBMISSION_BYTES} byte limit.`
+      );
+    }
+
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new ValidatorError('Invalid execution timeout.');
+    }
+  }
+
+  /**
+   * Compiles a submission inside an isolated `node:vm` realm and returns a
+   * runner for its exported functions.
+   *
+   * Student code never touches the host realm: `process`, `globalThis.env` and
+   * the server's module graph are simply not present in the sandbox, and every
+   * call into student code is bounded by `timeoutMs`, so an infinite loop
+   * terminates instead of hanging the request.
+   *
+   * Note: `node:vm` is a DoS boundary, not a security boundary. See the
+   * "Security" section of the README before exposing this route publicly.
+   */
+  private static createRunner(
+    userCode: string,
+    context: Record<string, any>,
+    timeoutMs: number
+  ) {
     const exportsObj: Record<string, any> = {};
     const moduleObj = { exports: exportsObj };
 
+    const jsCode = this.transpile(userCode);
+
+    /** Packages a submission is allowed to import inside the sandbox. */
+    const ALLOWED_PACKAGES: Record<string, unknown> = {
+      '@solana/web3.js': web3,
+      tweetnacl: nacl,
+      '@solana/spl-token': splToken,
+      crypto: { createHash, randomBytes },
+      bs58,
+    };
+
     const sandboxedRequire = (pkg: string) => {
-      let mod: any;
-      if (context[pkg]) mod = context[pkg];
-      else if (pkg === '@solana/web3.js') mod = require('@solana/web3.js');
-      else if (pkg === 'tweetnacl') mod = require('tweetnacl');
-      else if (pkg === '@solana/spl-token') mod = require('@solana/spl-token');
-      else if (pkg === 'crypto') mod = require('crypto');
-      else if (pkg === 'bs58') mod = require('bs58');
-      else mod = {};
+      const mod: any =
+        context[pkg] ?? (pkg in ALLOWED_PACKAGES ? ALLOWED_PACKAGES[pkg] : {});
 
       if (mod && typeof mod === 'object') {
         return new Proxy(mod, {
@@ -120,6 +176,8 @@ export class ChallengeValidator {
       'verifyProgramAccount',
     ];
 
+    // Students frequently forget `export`. Re-export any known function name
+    // that was declared at module scope but not attached to module.exports.
     const autoExportSnippets = knownFunctions
       .map(
         (fn) =>
@@ -127,34 +185,123 @@ export class ChallengeValidator {
       )
       .join('\n');
 
-    const argNames = ['exports', 'module', 'require', ...Object.keys(context)];
-    const argValues = [exportsObj, moduleObj, sandboxedRequire, ...Object.values(context)];
+    const sandbox: Record<string, any> = {
+      exports: exportsObj,
+      module: moduleObj,
+      require: sandboxedRequire,
+      // A console that cannot be used to exfiltrate anything or block output.
+      console: Object.freeze({
+        log: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      }),
+      // Invoked from inside the realm so the vm timeout also bounds calls into
+      // student functions, not just module initialisation.
+      __arenaInvoke: (target: unknown, args: unknown[]) =>
+        typeof target === 'function' ? (target as (...a: unknown[]) => unknown)(...args) : undefined,
+      __arenaResult: undefined,
+      __arenaTarget: undefined,
+      __arenaArgs: undefined,
+      ...context,
+    };
 
-    const wrappedFn = new Function(
-      ...argNames,
-      `${jsCode}\n${autoExportSnippets}\nreturn module.exports;`
+    const vmContext = vm.createContext(sandbox);
+
+    const initScript = new vm.Script(
+      `(function (exports, module, require) {\n${jsCode}\n${autoExportSnippets}\n})(exports, module, require);`,
+      { filename: 'challenge-submission.js' }
     );
-    wrappedFn(...argValues);
+
+    this.runInVm(initScript, vmContext, timeoutMs, 'compile');
 
     const finalExports =
       Object.keys(moduleObj.exports).length > 0 ? moduleObj.exports : exportsObj;
 
     // Handle export default fallback
     if (finalExports.default) {
-      if (typeof finalExports.default === 'function' && finalExports.default.name) {
-        if (!finalExports[finalExports.default.name]) {
-          finalExports[finalExports.default.name] = finalExports.default;
+      const fallback = finalExports.default;
+      if (typeof fallback === 'function' && fallback.name) {
+        if (!finalExports[fallback.name]) {
+          finalExports[fallback.name] = fallback;
         }
-      } else if (typeof finalExports.default === 'object') {
-        Object.assign(finalExports, finalExports.default);
+      } else if (typeof fallback === 'object') {
+        Object.assign(finalExports, fallback);
       }
     }
 
-    return finalExports;
+    const callScript = new vm.Script(
+      '__arenaResult = __arenaInvoke(__arenaTarget, __arenaArgs);',
+      { filename: 'challenge-call.js' }
+    );
+
+    // `call` is destructured by callers, so it cannot rely on a `this` binding.
+    const runInVm = this.runInVm.bind(this);
+
+    return {
+      exports: finalExports as Record<string, any>,
+      /** Invokes a student function under the same time budget as compilation. */
+      call<T = any>(target: unknown, args: unknown[] = []): T {
+        sandbox.__arenaTarget = target;
+        sandbox.__arenaArgs = args;
+        sandbox.__arenaResult = undefined;
+
+        runInVm(callScript, vmContext, timeoutMs, 'run');
+
+        const result = sandbox.__arenaResult as T;
+
+        sandbox.__arenaResult = undefined;
+        sandbox.__arenaTarget = undefined;
+        sandbox.__arenaArgs = undefined;
+
+        return result;
+      },
+    };
+  }
+
+  /** Runs a script in the sandbox, translating vm failures into readable errors. */
+  private static runInVm(
+    script: vm.Script,
+    vmContext: object,
+    timeoutMs: number,
+    phase: 'compile' | 'run'
+  ): void {
+    try {
+      script.runInContext(vmContext, { timeout: timeoutMs, displayErrors: true });
+    } catch (err: any) {
+      if (err?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+        throw new ValidatorError(
+          `Execution timed out after ${timeoutMs}ms. Check for an infinite loop or an unbounded loop in your solution.`
+        );
+      }
+      throw new ValidatorError(
+        phase === 'compile'
+          ? `Failed to compile submission: ${err?.message ?? String(err)}`
+          : err?.message ?? String(err)
+      );
+    }
+  }
+
+  /** TypeScript -> CommonJS, with a conservative fallback if transpilation fails. */
+  private static transpile(userCode: string): string {
+    try {
+      return ts.transpileModule(userCode, {
+        compilerOptions: {
+          module: ts.ModuleKind.CommonJS,
+          target: ts.ScriptTarget.ES2022,
+          esModuleInterop: true,
+          allowSyntheticDefaultImports: true,
+          removeComments: false,
+        },
+      }).outputText;
+    } catch {
+      return userCode.replace(/import\s+[^;]+;?/g, '');
+    }
   }
 
   // --- 01. Wallets & Keypairs ---
-  private static async validateWallets(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateWallets(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -165,7 +312,7 @@ export class ChallengeValidator {
       TextEncoder,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.generateAndSignMessage;
 
     if (typeof fn !== 'function') {
@@ -174,7 +321,7 @@ export class ChallengeValidator {
 
     // Test 1: Generate valid public key
     logs.push("Test 1: Calling generateAndSignMessage('test-challenge-message')...");
-    const result1 = fn('test-challenge-message');
+    const result1 = call(fn, ['test-challenge-message']);
 
     let t1Passed = false;
     try {
@@ -187,7 +334,7 @@ export class ChallengeValidator {
         actual: result1.publicKey,
       });
       logs.push(`✓ Public key generated: ${result1.publicKey}`);
-    } catch (e: any) {
+    } catch {
       testResults.push({
         id: 'test-1',
         name: 'Generate valid Base58 public key',
@@ -232,7 +379,7 @@ export class ChallengeValidator {
   }
 
   // --- 02. Transactions ---
-  private static async validateTransactions(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateTransactions(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -242,7 +389,7 @@ export class ChallengeValidator {
       PublicKey,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.buildTransferTransaction;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'buildTransferTransaction' not found.");
@@ -253,7 +400,7 @@ export class ChallengeValidator {
     const blockhash = 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDcg3iAZ2tFhGu3R';
     const lamports = 1_000_000;
 
-    const tx = fn(alice, bob, lamports, blockhash);
+    const tx = call(fn, [alice, bob, lamports, blockhash]);
 
     // Test 1: Contains SystemProgram transfer instruction
     const hasTransferIx = tx?.instructions?.some((ix: TransactionInstruction) =>
@@ -301,7 +448,7 @@ export class ChallengeValidator {
   }
 
   // --- 03. Accounts ---
-  private static async validateAccounts(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateAccounts(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -311,7 +458,7 @@ export class ChallengeValidator {
       SystemProgram,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.inspectAccount;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'inspectAccount' not found.");
@@ -325,7 +472,7 @@ export class ChallengeValidator {
       rentEpoch: 0,
     };
 
-    const report = fn(mockAccount);
+    const report = call(fn, [mockAccount]);
 
     // Test 1: Sol balance
     const t1 = report?.solBalance === 2.5;
@@ -350,7 +497,7 @@ export class ChallengeValidator {
     logs.push(t2 ? '✓ Account confirmed owned by System Program' : '✗ SystemProgram ownership check failed');
 
     // Test 3: Null handling
-    const nullReport = fn(null);
+    const nullReport = call(fn, [null]);
     const t3 = nullReport === null;
     testResults.push({
       id: 'test-3',
@@ -376,7 +523,8 @@ export class ChallengeValidator {
   private static async validatePdas(
     userCode: string,
     challenge: Challenge,
-    walletAddress?: string
+    walletAddress: string | undefined,
+    timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS
   ): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
@@ -386,19 +534,19 @@ export class ChallengeValidator {
       Buffer,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.deriveUserPda;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'deriveUserPda' not found.");
     }
 
     const testWallet = walletAddress ? new PublicKey(walletAddress) : Keypair.generate().publicKey;
-    const programId = new PublicKey('Arena111111111111111111111111111111111111111');
+    const programId = new PublicKey('A4oqd9fv4zzrFastj5VSNoe4ZdjHq3FUisSo3Dn1u6LS');
 
     logs.push(`Inputs:\n  Wallet: ${testWallet.toBase58()}\n  Program ID: ${programId.toBase58()}`);
     logs.push('Deriving PDA with seeds ["user", wallet_pubkey]...');
 
-    const [userPda, bump] = fn(testWallet, programId);
+    const [userPda, bump] = call(fn, [testWallet, programId]);
 
     // Expected reference calculation
     const [expectedPda, expectedBump] = PublicKey.findProgramAddressSync(
@@ -456,7 +604,7 @@ export class ChallengeValidator {
   }
 
   // --- 05. Custom Program Instructions ---
-  private static async validateInstructions(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateInstructions(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -466,7 +614,7 @@ export class ChallengeValidator {
       Buffer,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.buildArenaInstruction;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'buildArenaInstruction' not found.");
@@ -477,7 +625,7 @@ export class ChallengeValidator {
     const pdaAccount = Keypair.generate().publicKey;
     const actionTag = 7;
 
-    const ix = fn(programId, userWallet, pdaAccount, actionTag);
+    const ix = call(fn, [programId, userWallet, pdaAccount, actionTag]);
 
     // Test 1: Account permissions
     const userKeyMeta = ix?.keys?.find((k: any) => k.pubkey?.equals?.(userWallet));
@@ -525,24 +673,23 @@ export class ChallengeValidator {
   }
 
   // --- 06. Anchor Framework & Discriminators ---
-  private static async validateAnchor(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateAnchor(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
-    const { createHash } = require('crypto');
 
     const context = {
       createHash,
       Buffer,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.calculateAnchorDiscriminator;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'calculateAnchorDiscriminator' not found.");
     }
 
-    const discInit = fn('initialize_user');
-    const discRecord = fn('record_completion');
+    const discInit = call(fn, ['initialize_user']);
+    const discRecord = call(fn, ['record_completion']);
 
     // Reference hashes
     const refInit = createHash('sha256').update('global:initialize_user').digest().subarray(0, 8);
@@ -593,7 +740,7 @@ export class ChallengeValidator {
   }
 
   // --- 07. SPL Tokens ---
-  private static async validateSplTokens(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateSplTokens(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -603,7 +750,7 @@ export class ChallengeValidator {
       Number,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const uiToRaw = mod.uiAmountToRawUnits;
     const rawToUi = mod.rawUnitsToUi;
 
@@ -612,7 +759,7 @@ export class ChallengeValidator {
     }
 
     // Test 1: 1.5 USDC (6 decimals)
-    const raw1 = uiToRaw(1.5, 6);
+    const raw1 = call(uiToRaw, [1.5, 6]);
     const t1 = raw1 === 1500000n;
     testResults.push({
       id: 'test-1',
@@ -624,7 +771,7 @@ export class ChallengeValidator {
     logs.push(t1 ? '✓ 1.5 USDC = 1,500,000 base units' : `✗ Expected 1500000n, received ${raw1}`);
 
     // Test 2: 2.75 SOL (9 decimals)
-    const raw2 = uiToRaw(2.75, 9);
+    const raw2 = call(uiToRaw, [2.75, 9]);
     const t2 = raw2 === 2750000000n;
     testResults.push({
       id: 'test-2',
@@ -636,7 +783,7 @@ export class ChallengeValidator {
     logs.push(t2 ? '✓ 2.75 SOL = 2,750,000,000 lamports' : `✗ Expected 2750000000n, received ${raw2}`);
 
     // Test 3: Reverse back to UI
-    const uiBack = rawToUi(1500000n, 6);
+    const uiBack = call(rawToUi, [1500000n, 6]);
     const t3 = uiBack === 1.5;
     testResults.push({
       id: 'test-3',
@@ -659,7 +806,7 @@ export class ChallengeValidator {
   }
 
   // --- 08. Associated Token Accounts ---
-  private static async validateTokenAccounts(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateTokenAccounts(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -673,7 +820,7 @@ export class ChallengeValidator {
       ASSOCIATED_TOKEN_PROGRAM_ID,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.deriveAssociatedTokenAccount;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'deriveAssociatedTokenAccount' not found.");
@@ -682,7 +829,7 @@ export class ChallengeValidator {
     const testWallet = Keypair.generate().publicKey;
     const testMint = Keypair.generate().publicKey;
 
-    const ata = fn(testWallet, testMint);
+    const ata = call(fn, [testWallet, testMint]);
 
     // Reference calculation
     const [expectedAta] = PublicKey.findProgramAddressSync(
@@ -711,7 +858,7 @@ export class ChallengeValidator {
     logs.push(t2 ? `✓ ATA matches standard derivation: ${expectedAta.toBase58()}` : '✗ ATA mismatch');
 
     // Test 3: Deterministic
-    const ataAgain = fn(testWallet, testMint);
+    const ataAgain = call(fn, [testWallet, testMint]);
     const t3 = ataAgain?.equals?.(ata);
     testResults.push({
       id: 'test-3',
@@ -732,7 +879,7 @@ export class ChallengeValidator {
   }
 
   // --- 09. CPI ---
-  private static async validateCpi(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateCpi(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -742,7 +889,7 @@ export class ChallengeValidator {
       SystemProgram,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.buildCpiTransferInstruction;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'buildCpiTransferInstruction' not found.");
@@ -752,7 +899,7 @@ export class ChallengeValidator {
     const bob = Keypair.generate().publicKey;
     const lamports = 500_000;
 
-    const prep = fn(alice, bob, lamports);
+    const prep = call(fn, [alice, bob, lamports]);
 
     // Test 1: Callee is SystemProgram
     const t1 = prep?.calleeProgramId === SystemProgram.programId.toBase58();
@@ -797,7 +944,7 @@ export class ChallengeValidator {
   }
 
   // --- 10. Deploy & Verify ---
-  private static async validateDeploy(userCode: string, challenge: Challenge): Promise<ValidationResult> {
+  private static async validateDeploy(userCode: string, challenge: Challenge, timeoutMs: number = DEFAULT_EXECUTION_TIMEOUT_MS): Promise<ValidationResult> {
     const testResults: TestResult[] = [];
     const logs: string[] = [];
 
@@ -810,7 +957,7 @@ export class ChallengeValidator {
       BPF_UPGRADEABLE_LOADER_ID,
     };
 
-    const mod = this.evaluateModule(userCode, context);
+    const { exports: mod, call } = this.createRunner(userCode, context, timeoutMs);
     const fn = mod.verifyProgramAccount;
     if (typeof fn !== 'function') {
       throw new Error("Expected function 'verifyProgramAccount' not found.");
@@ -832,8 +979,8 @@ export class ChallengeValidator {
       rentEpoch: 0,
     };
 
-    const resValid = fn(validProgramAccount);
-    const resInvalid = fn(invalidAccount);
+    const resValid = call(fn, [validProgramAccount]);
+    const resInvalid = call(fn, [invalidAccount]);
 
     // Test 1: Valid program
     const t1 = resValid?.isProgram === true;
@@ -861,7 +1008,7 @@ export class ChallengeValidator {
       data: Buffer.alloc(0),
       rentEpoch: 0,
     };
-    const resWrongOwner = fn(mockWrongOwner);
+    const resWrongOwner = call(fn, [mockWrongOwner]);
     const t3 = resWrongOwner?.isProgram === false;
     testResults.push({
       id: 'test-3',

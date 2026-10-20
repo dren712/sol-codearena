@@ -2,16 +2,28 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Local demo default: SQLite file at apps/web/prisma/dev.db.
+// To deploy (Vercel + Supabase), swap this block for the Postgres one filed in
+// DEPLOY.md — it is a 3-line change plus `npm run db:push`.
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  url      = env("DATABASE_URL")
 }
+
+// Postgres/Supabase variant (swap in for deploys):
+// datasource db {
+//   provider  = "postgresql"
+//   url       = env("DATABASE_URL")
+//   directUrl = env("DIRECT_DATABASE_URL")
+// }
 
 model User {
   id             String       @id @default(cuid())
   walletAddress  String       @unique
   username       String?
   createdAt      DateTime     @default(now())
+  /// Tracks real activity so the leaderboard can show when someone was last here.
+  updatedAt      DateTime     @default(now()) @updatedAt
   completedCount Int          @default(0)
   totalScore     Int          @default(0)
   submissions    Submission[]
@@ -47,6 +59,9 @@ model Submission {
   createdAt       DateTime  @default(now())
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   challenge       Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  // A wallet may retry a challenge as often as they like, so this is not unique.
+  @@index([userId, challengeId, status, createdAt])
 }
 
 model Completion {

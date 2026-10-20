@@ -6,22 +6,21 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import {
   CheckCircle2,
   Circle,
-  ArrowRight,
   Search,
-  Sparkles,
   Layers,
   Terminal,
   Cpu,
   Coins,
-  ExternalLink,
 } from 'lucide-react';
 import { CHALLENGES } from '@challenges/data';
+import Roadmap from '../../components/Roadmap';
 
 export default function ChallengesPage() {
   const { publicKey } = useWallet();
   const [completedIds, setCompletedIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [viewMode, setViewMode] = useState<'roadmap' | 'grid'>('roadmap');
   const [loadingCompletions, setLoadingCompletions] = useState(false);
 
   useEffect(() => {
@@ -164,8 +163,36 @@ export default function ChallengesPage() {
         </div>
       </div>
 
+      {/* View toggle */}
+      <div className="flex items-center gap-1 mb-6 p-1 rounded-lg bg-surface-100 border border-surface-border w-fit">
+        {(['roadmap', 'grid'] as const).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setViewMode(mode)}
+            className={`px-3 py-1.5 rounded-md text-xs font-mono font-semibold transition-colors ${
+              viewMode === mode
+                ? 'bg-solana-purple text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {mode === 'roadmap' ? '🗺️ Roadmap' : '📋 Grid'}
+          </button>
+        ))}
+      </div>
+
+      {viewMode === 'roadmap' ? (
+        <Roadmap completedIds={completedIds} />
+      ) : (
+        <>
       {/* Challenge Groups */}
       <div className="space-y-10">
+        {loadingCompletions && (
+          <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
+            <div className="w-3 h-3 rounded-full border-2 border-surface-border border-t-solana-purple animate-spin" />
+            <span>Loading your progress…</span>
+          </div>
+        )}
+
         {grouped.map((group) => {
           if (group.items.length === 0) return null;
           const GroupIcon = group.icon;
@@ -265,6 +292,8 @@ export default function ChallengesPage() {
           );
         })}
       </div>
+        </>
+      )}
     </div>
   );
 }

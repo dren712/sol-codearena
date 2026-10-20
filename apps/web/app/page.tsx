@@ -7,11 +7,9 @@ import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import {
   Terminal,
   Code2,
-  CheckCircle2,
   ExternalLink,
   Cpu,
   Coins,
-  ShieldCheck,
   Sparkles,
   ArrowRight,
   Layers,
@@ -123,7 +121,7 @@ export default function HomePage() {
                 { step: '04', label: 'Verify', sub: 'Test Suite' },
                 { step: '05', label: 'Record', sub: 'Anchor Program' },
                 { step: '06', label: 'Progress', sub: 'Completion PDA' },
-              ].map((item, idx) => (
+              ].map((item) => (
                 <div
                   key={item.step}
                   className="flex flex-col items-center p-2 rounded bg-surface-100/60 border border-surface-border/60 hover:border-solana-purple/50 transition-colors"
@@ -146,7 +144,7 @@ export default function HomePage() {
               Structured Curriculum
             </div>
             <h2 className="text-2xl sm:text-3xl font-bold text-white mt-1">
-              From "What is a PDA?" to On-Chain Mastery
+              From &quot;What is a PDA?&quot; to On-Chain Mastery
             </h2>
           </div>
           <Link
@@ -220,7 +218,7 @@ export default function HomePage() {
                 Challenge 04: Program Derived Addresses (PDAs)
               </h3>
               <p className="text-sm text-slate-400 mb-6 leading-relaxed">
-                Derive an off-curve PDA from seeds <code className="text-solana-teal">["user", wallet]</code>, execute client validation, sign with your wallet, and watch your Completion PDA record permanently on Solana Devnet.
+                Derive an off-curve PDA from seeds <code className="text-solana-teal">[&quot;user&quot;, wallet]</code>, execute client validation, sign with your wallet, and watch your Completion PDA record permanently on Solana Devnet.
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <Link

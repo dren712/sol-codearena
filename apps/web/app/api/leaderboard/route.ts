@@ -1,5 +1,12 @@
 import { NextResponse } from 'next/server';
+
 import { prisma } from '@/lib/prisma';
+import { CHALLENGES } from '@challenges/data';
+import { totalAvailablePoints } from '@/lib/progress';
+
+// A pure-GET handler would otherwise be prerendered at build time and serve a
+// frozen leaderboard forever.
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
@@ -11,26 +18,40 @@ export async function GET() {
       take: 50,
       include: {
         completions: {
-          select: { id: true, challengeId: true, txSignature: true },
+          select: { id: true, challengeId: true, txSignature: true, verified: true },
         },
       },
     });
 
-    const leaderboard = users.map((u, index) => ({
-      rank: index + 1,
-      id: u.id,
-      walletAddress: u.walletAddress,
-      username: u.username || `Builder_${u.walletAddress.slice(0, 4)}`,
-      completedCount: u.completedCount,
-      score: u.totalScore,
-      lastActive: u.createdAt.toISOString(),
-      onchainVerified: u.completions.some((c) => !!c.txSignature),
-      completionsCount: u.completions.length,
-    }));
+    const maxScore = totalAvailablePoints();
 
-    return NextResponse.json(leaderboard);
+    const leaderboard = users.map((u, index) => {
+      // "Verified" means an account that was actually checked against the
+      // cluster — a stored signature string alone proves nothing.
+      const verifiedCompletions = u.completions.filter((c) => c.verified).length;
+
+      return {
+        rank: index + 1,
+        id: u.id,
+        walletAddress: u.walletAddress,
+        username: u.username || `Builder_${u.walletAddress.slice(0, 4)}`,
+        completedCount: u.completedCount,
+        score: u.totalScore,
+        lastActive: u.updatedAt.toISOString(),
+        onchainVerified: verifiedCompletions > 0,
+        verifiedCompletions,
+        completionsCount: u.completions.length,
+        progressPercent: maxScore > 0 ? Math.round((u.totalScore / maxScore) * 100) : 0,
+      };
+    });
+
+    return NextResponse.json({
+      leaderboard,
+      totalChallenges: CHALLENGES.length,
+      maxScore,
+    });
   } catch (error) {
     console.error('Error in leaderboard API:', error);
-    return NextResponse.json([], { status: 500 });
+    return NextResponse.json({ leaderboard: [], totalChallenges: 0, maxScore: 0 }, { status: 500 });
   }
 }

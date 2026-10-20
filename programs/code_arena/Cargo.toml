@@ -9,6 +9,7 @@ crate-type = ["cdylib", "lib"]
 name = "code_arena"
 
 [features]
+idl-build = ["anchor-lang/idl-build"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
@@ -16,4 +17,5 @@ cpi = ["no-entrypoint"]
 default = []
 
 [dependencies]
-anchor-lang = "0.30.1"
+# `init-if-needed` powers the duplicate-completion guard in `record_completion`.
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }

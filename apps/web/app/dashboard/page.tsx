@@ -1,15 +1,14 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import {
-  Award,
   CheckCircle2,
   ExternalLink,
   ShieldCheck,
-  Trophy,
   ArrowRight,
   Terminal,
   Cpu,
@@ -19,7 +18,17 @@ import {
   Check,
 } from 'lucide-react';
 import { CHALLENGES } from '@challenges/data';
-import { getUserPda, getCompletionPda, getExplorerTxUrl, getExplorerAddressUrl } from '@packages/sdk';
+import { getExplorerTxUrl, getExplorerAddressUrl } from '@packages/sdk';
+import { deriveBadges } from '../../lib/badges';
+import AchievementBadges from '../../components/AchievementBadges';
+import AccountExplorer from '../../components/AccountExplorer';
+
+/** Reads `?account=` so other tools can deep-link an address into the explorer. */
+function AccountProbe() {
+  const params = useSearchParams();
+  const address = params ? params.get('account') || '' : '';
+  return <AccountExplorer initialAddress={address} autoInspect={Boolean(address)} />;
+}
 
 export default function DashboardPage() {
   const { publicKey, connected } = useWallet();
@@ -57,6 +66,8 @@ export default function DashboardPage() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const badgeReport = deriveBadges(userData?.completions ?? []);
 
   const completedCount = userData?.completedCount || 0;
   const totalScore = userData?.totalScore || 0;
@@ -99,6 +110,13 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-10 w-full flex-1">
+      {loading && (
+        <div className="mb-4 flex items-center gap-2 text-[11px] font-mono text-slate-500">
+          <div className="w-3 h-3 rounded-full border-2 border-surface-border border-t-solana-purple animate-spin" />
+          <span>Syncing progress…</span>
+        </div>
+      )}
+
       {/* Demo notice if disconnected */}
       {isDemo && (
         <div className="mb-6 p-4 rounded-lg bg-surface-100 border border-surface-border flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -227,6 +245,11 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Achievements */}
+      <div className="p-6 rounded-lg bg-surface-100 border border-surface-border mb-8">
+        <AchievementBadges badges={badgeReport.badges} earnedCount={badgeReport.earnedCount} />
+      </div>
+
       {/* On-Chain Activity & Verifications */}
       <div className="p-6 rounded-lg bg-surface-100 border border-surface-border">
         <div className="flex items-center justify-between mb-4">
@@ -323,6 +346,34 @@ export default function DashboardPage() {
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Embedded account explorer */}
+      <div className="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 p-6 rounded-lg bg-surface-100 border border-surface-border">
+          <h3 className="text-base font-bold text-white flex items-center gap-2 mb-1">
+            <ShieldCheck className="w-4 h-4 text-solana-teal" />
+            <span>Inspect Any Account</span>
+          </h3>
+          <p className="text-xs text-slate-400 mb-4">
+            Paste any pubkey — a wallet, a token mint, or a PDA from the visualizer — and read its
+            live anatomy straight from Devnet: balance, owner program, data size.
+          </p>
+          <Suspense fallback={null}>
+            <AccountProbe />
+          </Suspense>
+        </div>
+        <div className="p-6 rounded-lg bg-surface-100 border border-surface-border">
+          <h3 className="text-base font-bold text-white flex items-center gap-2 mb-1">
+            <Terminal className="w-4 h-4 text-solana-purple" />
+            <span>Try the PDA round-trip</span>
+          </h3>
+          <ol className="text-xs text-slate-400 space-y-2 list-decimal list-inside leading-relaxed">
+            <li>Open the PDA visualizer on challenge 04 and derive your completion PDA.</li>
+            <li>Inspect it here — it reads <span className="font-mono text-amber-300">Unknown account</span> until your completion is recorded.</li>
+            <li>Record the completion on Devnet, then re-inspect: the account appears with your program as owner.</li>
+          </ol>
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { Challenge } from './types/index';
+import type { Challenge } from './types/index';
 
 export const CHALLENGES: Challenge[] = [
   {

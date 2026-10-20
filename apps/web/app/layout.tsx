@@ -1,11 +1,43 @@
 import type { Metadata } from 'next';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { SolanaWalletProvider } from '../components/SolanaWalletProvider';
 import { Navbar } from '../components/Navbar';
 
+/** Self-hosted through next/font: no render-blocking request to Google. */
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+});
+
 export const metadata: Metadata = {
-  title: 'Solana Code Arena | Learn Solana by Building',
-  description: 'Interactive learning platform for developers to master Solana development by solving practical coding challenges with verifiable on-chain proofs.',
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
+  title: {
+    default: 'Solana Code Arena | Learn Solana by Building',
+    template: '%s | Solana Code Arena',
+  },
+  description:
+    'Interactive learning platform for developers to master Solana development by solving practical coding challenges with verifiable on-chain proofs.',
+  keywords: ['Solana', 'web3', 'learning', 'anchor', 'education', 'coding challenges'],
+  openGraph: {
+    title: 'Solana Code Arena',
+    description:
+      'Master Solana development by solving practical coding challenges with verifiable on-chain proofs.',
+    type: 'website',
+    siteName: 'Solana Code Arena',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Solana Code Arena',
+    description: 'Learn Solana by building — 10 graded challenges with on-chain proofs.',
+  },
 };
 
 export const dynamic = 'force-dynamic';
@@ -16,15 +48,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap"
-          rel="stylesheet"
-        />
-      </head>
+    <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`}>
       <body className="min-h-screen bg-background text-slate-100 flex flex-col font-sans antialiased selection:bg-solana-purple selection:text-white">
         <SolanaWalletProvider>
           <Navbar />

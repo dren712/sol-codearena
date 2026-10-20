@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web app (typecheck, lint, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # npm workspaces keep a single lockfile at the repository root.
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          DATABASE_URL: file:./dev.db
+
+  program:
+    name: Anchor program (cargo test + check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Compile check
+        run: cargo check --all-targets

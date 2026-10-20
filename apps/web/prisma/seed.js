@@ -302,7 +302,11 @@ async function main() {
       create: u,
     });
 
-    // Add completion for PDA challenge for Alice and Darshan
+    // Add a completion for the PDA challenge for Alice and Darshan.
+    // NOTE: honest demo data — the program is not deployed, so these completions
+    // are recorded locally and NOT marked as on-chain verified. A fabricated
+    // signature here would show a "verified" badge whose explorer link 404s, in
+    // a class about on-chain proof.
     if (u.username === 'Alice_Sol' || u.username === 'Darshan') {
       await prisma.completion.upsert({
         where: {
@@ -311,12 +315,13 @@ async function main() {
             challengeId: '04-pdas',
           },
         },
-        update: {},
+        // Reset stale fake proof from older seeds as well as new installs.
+        update: { txSignature: null, verified: false },
         create: {
           userId: user.id,
           challengeId: '04-pdas',
-          txSignature: '5fG9QxZq3K9kK8vLmNoPqRsTuVwXyZ1234567890abcdefghijklmnopqrstuvwxyz1234567890',
-          verified: true,
+          txSignature: null,
+          verified: false,
         },
       });
     }

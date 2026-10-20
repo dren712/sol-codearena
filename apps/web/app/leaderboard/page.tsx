@@ -2,32 +2,26 @@
 
 import React, { useState, useEffect } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
-import {
-  Trophy,
-  Medal,
-  ShieldCheck,
-  ExternalLink,
-  Flame,
-  Award,
-  Users,
-} from 'lucide-react';
+import { Trophy, ShieldCheck, ExternalLink, Flame, Users } from 'lucide-react';
 import { getExplorerAddressUrl } from '@packages/sdk';
 
 export default function LeaderboardPage() {
   const { publicKey } = useWallet();
   const [builders, setBuilders] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [totals, setTotals] = useState({ totalChallenges: 0, maxScore: 0 });
 
   useEffect(() => {
     async function fetchLeaderboard() {
       try {
         const res = await fetch('/api/leaderboard');
         const data = await res.json();
-        setBuilders(data);
+        setBuilders(Array.isArray(data) ? data : data.leaderboard ?? []);
+        setTotals({
+          totalChallenges: data?.totalChallenges ?? 0,
+          maxScore: data?.maxScore ?? 0,
+        });
       } catch (err) {
         console.error('Error fetching leaderboard:', err);
-      } finally {
-        setLoading(false);
       }
     }
     fetchLeaderboard();
@@ -58,6 +52,14 @@ export default function LeaderboardPage() {
         <div className="flex items-center gap-3 bg-surface-100 border border-surface-border px-4 py-2.5 rounded-lg font-mono text-xs text-slate-300">
           <Users className="w-4 h-4 text-solana-purple" />
           <span>Active Builders: {builders.length}</span>
+          {totals.maxScore > 0 && (
+            <>
+              <span className="text-surface-border">|</span>
+              <span>
+                {totals.totalChallenges} challenges · {totals.maxScore} pts
+              </span>
+            </>
+          )}
         </div>
       </div>
 

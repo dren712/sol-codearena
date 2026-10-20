@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { Terminal, Award, Trophy, Code2, Droplets, CheckCircle, ExternalLink } from 'lucide-react';
+import { Terminal, Award, Trophy, Code2, Droplets } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
   const pathname = usePathname();
